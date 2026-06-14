@@ -1,20 +1,40 @@
 import express from "express"
 import { createClient } from "@supabase/supabase-js"
+import makeWASocket, { DisconnectReason, initAuthCreds, BufferJSON, proto } from "@whiskeysockets/baileys"
+import { Boom } from "@hapi/boom"
+import qrcode from "qrcode"
 
-const app = express()
-app.use(express.json())
-
+// ── ENV ────────────────────────────────────────────────────────────────────────
 const SUPABASE_URL = process.env.SUPABASE_URL || ""
 const SUPABASE_KEY = process.env.SUPABASE_ANON_PUBLIC || process.env.SUPABASE_KEY || ""
 
 if (!SUPABASE_URL || !SUPABASE_KEY) {
-  console.error("ERROR: SUPABASE_URL and SUPABASE_ANON_KEY must be set")
+  console.error("ERROR: SUPABASE_URL and SUPABASE_ANON_PUBLIC must be set")
   process.exit(1)
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY)
 
-app.get("/", (_, res) => res.json({ status: "API LIVE", version: "2.0" }))
+// ── EXPRESS ────────────────────────────────────────────────────────────────────
+const app = express()
+app.use(express.json())
+
+let latestQR = null
+let waConnected = false
+
+app.get("/", (_, res) => res.json({ status: "API LIVE", version: "3.0", whatsapp: waConnected ? "connected" : "disconnected" }))
+
+app.get("/qr", async (_, res) => {
+  if (waConnected) return res.send("<h2>✅ WhatsApp already connected!</h2>")
+  if (!latestQR) return res.send("<h2>⏳ QR not ready yet, refresh in 5 seconds...</h2>")
+  const img = await qrcode.toDataURL(latestQR)
+  res.send(`<html><body style="text-align:center;background:#111;color:#fff">
+    <h2>Scan with WhatsApp</h2>
+    <img src="${img}" style="width:300px"/>
+    <p>Phone → Linked Devices → Link a Device</p>
+    <script>setTimeout(()=>location.reload(),30000)</script>
+  </body></html>`)
+})
 
 app.post("/client", async (req, res) => {
   const { phone, name } = req.body
@@ -84,3 +104,109 @@ app.post("/booking", async (req, res) => {
 })
 
 app.listen(process.env.PORT || 3000, () => console.log("Server running on port", process.env.PORT || 3000))
+
+// ── SUPABASE AUTH STATE (persist session so QR only needed once) ───────────────
+async function useSupabaseAuthState() {
+  const KEY = "wa_session"
+
+  async function readData(k) {
+    const { data } = await supabase.from("wa_auth").select("value").eq("key", k).single()
+    if (!data) return null
+    return JSON.parse(data.value, BufferJSON.reviver)
+  }
+
+  async function writeData(k, v) {
+    await supabase.from("wa_auth").upsert({ key: k, value: JSON.stringify(v, BufferJSON.replacer) }, { onConflict: "key" })
+  }
+
+  async function removeData(k) {
+    await supabase.from("wa_auth").delete().eq("key", k)
+  }
+
+  const creds = await readData(KEY + "_creds") || initAuthCreds()
+
+  return {
+    state: {
+      creds,
+      keys: {
+        get: async (type, ids) => {
+          const data = {}
+          for (const id of ids) {
+            const val = await readData(KEY + "_" + type + "_" + id)
+            data[id] = val
+          }
+          return data
+        },
+        set: async (data) => {
+          for (const [type, ids] of Object.entries(data)) {
+            for (const [id, val] of Object.entries(ids)) {
+              if (val) await writeData(KEY + "_" + type + "_" + id, val)
+              else await removeData(KEY + "_" + type + "_" + id)
+            }
+          }
+        }
+      }
+    },
+    saveCreds: () => writeData(KEY + "_creds", creds)
+  }
+}
+
+// ── WHATSAPP BOT ───────────────────────────────────────────────────────────────
+async function startWhatsApp() {
+  console.log("Starting WhatsApp bot...")
+  const { state, saveCreds } = await useSupabaseAuthState()
+  const sock = makeWASocket({ auth: state, printQRInTerminal: true })
+
+  sock.ev.on("creds.update", saveCreds)
+
+  sock.ev.on("connection.update", async ({ connection, lastDisconnect, qr }) => {
+    if (qr) {
+      latestQR = qr
+      waConnected = false
+      console.log("QR ready — visit /qr to scan")
+    }
+    if (connection === "open") {
+      waConnected = true
+      latestQR = null
+      console.log("✅ WhatsApp connected!")
+    }
+    if (connection === "close") {
+      waConnected = false
+      const code = new Boom(lastDisconnect?.error)?.output?.statusCode
+      if (code !== DisconnectReason.loggedOut) {
+        console.log("Reconnecting...")
+        setTimeout(startWhatsApp, 5000)
+      } else {
+        console.log("Logged out — visit /qr to reconnect")
+      }
+    }
+  })
+
+  sock.ev.on("messages.upsert", async ({ messages, type }) => {
+    if (type !== "notify") return
+    const msg = messages[0]
+    if (!msg.message || msg.key.fromMe) return
+    const from = msg.key.remoteJid
+    const text = msg.message.conversation || msg.message.extendedTextMessage?.text || ""
+    console.log("Message from", from, ":", text)
+
+    // Upsert client in Supabase
+    await supabase.from("clients").upsert({ phone: from }, { onConflict: "phone" })
+
+    const lower = text.toLowerCase().trim()
+    if (lower === "hi" || lower === "hello") {
+      await sock.sendMessage(from, { text: "👋 Welcome to House of Keyshad! Reply *PAY* to get payment details or *BOOK* to book a session." })
+    } else if (lower === "pay") {
+      await sock.sendMessage(from, { text: "💳 Send payment via:\n- PayPal: pay@houseofkeyshad.com\n- Ziina: @houseofkeyshad\n\nSend proof to this chat and we will confirm within 1 hour." })
+    } else if (lower === "book") {
+      const { data: client } = await supabase.from("clients").select("status").eq("phone", from).single()
+      if (client?.status === "active") {
+        await sock.sendMessage(from, { text: "✅ You are verified! Reply with your preferred date and service to book." })
+      } else {
+        await sock.sendMessage(from, { text: "⚠️ Payment required before booking. Reply *PAY* for payment details." })
+      }
+    }
+  })
+}
+
+startWhatsApp().catch(err => console.error("WhatsApp error:", err))
