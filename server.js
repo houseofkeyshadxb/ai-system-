@@ -5,7 +5,7 @@ const app = express()
 app.use(express.json())
 
 const SUPABASE_URL = process.env.SUPABASE_URL || ""
-const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_KEY || ""
+const SUPABASE_KEY = process.env.SUPABASE_ANON_PUBLIC || process.env.SUPABASE_KEY || ""
 
 if (!SUPABASE_URL || !SUPABASE_KEY) {
   console.error("ERROR: SUPABASE_URL and SUPABASE_ANON_KEY must be set")
