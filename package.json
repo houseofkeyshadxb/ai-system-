@@ -1,5 +1,5 @@
 {
-  "name": "backend-api",
+  "name": "ai-system",
   "type": "module",
   "scripts": {
     "start": "node server.js"
@@ -9,6 +9,7 @@
     "node-fetch": "^3.3.2",
     "@supabase/supabase-js": "^2.39.0",
     "@whiskeysockets/baileys": "^6.6.0",
-    "@hapi/boom": "^10.0.1"
+    "@hapi/boom": "^10.0.1",
+    "qrcode": "^1.5.3"
   }
 }
