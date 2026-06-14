@@ -4,7 +4,15 @@ import { createClient } from "@supabase/supabase-js"
 const app = express()
 app.use(express.json())
 
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY)
+const SUPABASE_URL = process.env.SUPABASE_URL || ""
+const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_KEY || ""
+
+if (!SUPABASE_URL || !SUPABASE_KEY) {
+  console.error("ERROR: SUPABASE_URL and SUPABASE_ANON_KEY must be set")
+  process.exit(1)
+}
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY)
 
 app.get("/", (_, res) => res.json({ status: "API LIVE", version: "2.0" }))
 
@@ -60,7 +68,7 @@ app.post("/confirm-payment", async (req, res) => {
 
 app.get("/client/:phone", async (req, res) => {
   const { data: client } = await supabase.from("clients")
-    .select("*, payments(*), bookings(*)").eq("phone", req.params.phone).single()
+    .select("*, payments(*)").eq("phone", req.params.phone).single()
   if (!client) return res.status(404).json({ error: "Client not found" })
   res.json({ client })
 })
@@ -75,4 +83,4 @@ app.post("/booking", async (req, res) => {
   res.json({ booking })
 })
 
-app.listen(process.env.PORT || 3000, () => console.log("Server running on", process.env.PORT || 3000))
+app.listen(process.env.PORT || 3000, () => console.log("Server running on port", process.env.PORT || 3000))
